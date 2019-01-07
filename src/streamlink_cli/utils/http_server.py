@@ -1,3 +1,4 @@
+import logging
 import socket
 
 from io import BytesIO
@@ -6,6 +7,11 @@ try:
     from BaseHTTPServer import BaseHTTPRequestHandler
 except ImportError:
     from http.server import BaseHTTPRequestHandler
+
+import eventlet
+
+
+log = logging.getLogger(__name__)
 
 
 class HTTPRequest(BaseHTTPRequestHandler):
@@ -24,8 +30,10 @@ class HTTPServer(object):
     def __init__(self):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.conn = self.host = self.port = None
+        self.host = self.port = None
         self.bound = False
+        self.clients = set()
+        self.accepter = None
 
     @property
     def addresses(self):
@@ -64,11 +72,9 @@ class HTTPServer(object):
         if self.host == "0.0.0.0":
             self.host = None
 
-    def open(self, timeout=30):
-        self.socket.settimeout(timeout)
-
+    def accept_client(self):
         try:
-            conn, addr = self.socket.accept()
+            conn, _ = self.socket.accept()
             conn.settimeout(None)
         except socket.timeout:
             raise OSError("Socket accept timed out")
@@ -97,19 +103,44 @@ class HTTPServer(object):
             conn.close()
             raise OSError
 
-        self.conn = conn
+        self.clients.add(conn)
 
-        return req
+        user_agent = req.headers.get("User-Agent") or "unknown player"
+        log.info("Got HTTP request from {0}".format(user_agent))
+
+    def accept_loop(self):
+        while True:
+            try:
+                self.accept_client()
+            except Exception:
+                log.exception('Exception in accept_loop, continuing')
+
+    def open(self, timeout=30):
+        self.socket.settimeout(timeout)
+        self.accept_client()
+        self.accepter = eventlet.spawn_n(self.accept_loop)
 
     def write(self, data):
-        if not self.conn:
+        if not self.clients:
             raise IOError("No connection")
 
-        self.conn.sendall(data)
+        for conn in list(self.clients):
+            try:
+                conn.sendall(data)
+            except Exception:
+                log.exception('Exception sending data to conn, removing')
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self.clients.remove(conn)
 
     def close(self, client_only=False):
-        if self.conn:
-            self.conn.close()
+        if self.accepter:
+            self.accepter.throw()
+
+        for conn in self.clients:
+            conn.close()
 
         if not client_only:
             try:

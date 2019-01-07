@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+
 import argparse
 import errno
 import logging
@@ -205,10 +208,7 @@ def output_stream_http(plugin, initial_streams, external=False, port=0):
         for url in server.urls:
             log.info(" " + url)
 
-    for req in iter_http_requests(server, player):
-        user_agent = req.headers.get("User-Agent") or "unknown player"
-        log.info("Got HTTP request from {0}".format(user_agent))
-
+    for _ in iter_http_requests(server, player):
         stream_fd = prebuffer = None
         while not stream_fd and (not player or player.running):
             try:
